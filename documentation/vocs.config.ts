@@ -38,16 +38,16 @@ const SIDEBAR_ITEMS = [
             link: "/developers/proof-lifecycle",
           },
           {
+            text: "Pricing a Request",
+            link: "/developers/tutorials/pricing",
+          },
+          {
             text: "Request a Proof",
             link: "/developers/tutorials/request",
           },
           {
-            text: "Tracking your Request",
+            text: "Tracking a Request",
             link: "/developers/tutorials/tracking",
-          },
-          {
-            text: "Pricing a Request",
-            link: "/developers/tutorials/pricing",
           },
           {
             text: "Use a Proof",
@@ -221,25 +221,32 @@ const SIDEBAR_ITEMS = [
       },
       {
         text: "ZK Mining",
-        link: "/zkc/mining/quick-start",
         items: [
           {
-            text: "Quick Start",
-            link: "/zkc/mining/quick-start",
+            text: "Overview",
+            link: "/zkc/mining/overview",
           },
           {
             text: "Wallet Setup",
             link: "/zkc/mining/wallet-setup",
           },
           {
-            text: "Mining + Claiming Rewards",
+            text: "Enabling ZK Mining",
+            link: "/zkc/mining/enable",
+          },
+          {
+            text: "Mining Walkthrough",
+            link: "/zkc/mining/walkthrough",
+          },
+          {
+            text: "Claiming Rewards",
             link: "/zkc/mining/claiming-rewards",
           }
         ],
       },
       {
         text: "$ZKC as Proving Collateral",
-        link: "/zkc/proving-collateral"
+        link: "/zkc/collateral"
       },
       {
         text: "Token Source Code & Docs",
@@ -279,7 +286,7 @@ export default defineConfig({
   logoUrl: "/logo.svg",
   topNav: [
     { text: "Explorer", link: "https://explorer.boundless.network/orders" },
-    { text: "Discord", link: "https://discord.gg/aXRuD6spez" }
+    { text: "Support Forum", link: "https://github.com/boundless-xyz/boundless/discussions" }
   ],
   font: {
     mono: {
@@ -299,6 +306,10 @@ export default defineConfig({
       icon: "x",
       link: "https://x.com/boundless_xyz",
     },
+    {
+      icon: "discord",
+      link: "https://discord.com/invite/boundlessxyz",
+    }
   ],
   rootDir: "site",
   title: "Boundless Docs",
