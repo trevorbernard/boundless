@@ -121,7 +121,7 @@ impl From<RequestError> for OrderPickerErr {
 #[derive(Clone)]
 pub struct OrderPicker<P> {
     db: DbObj,
-    config: ConfigLock,
+    pub (crate) config: ConfigLock,
     prover: ProverObj,
     provider: Arc<P>,
     chain_monitor: Arc<ChainMonitorService<P>>,

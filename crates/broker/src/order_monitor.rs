@@ -148,7 +148,7 @@ pub struct OrderMonitor<P> {
     db: DbObj,
     chain_monitor: Arc<ChainMonitorService<P>>,
     block_time: u64,
-    config: ConfigLock,
+    pub(crate) config: ConfigLock,
     market: BoundlessMarketService<Arc<P>>,
     provider: Arc<P>,
     prover_addr: Address,

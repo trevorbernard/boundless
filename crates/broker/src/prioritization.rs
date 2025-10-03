@@ -129,7 +129,7 @@ where
             orders.sort_by_key(|order| order.as_ref().expiry());
         }
         UnifiedPriorityMode::HighestExpectedValue => {
-            let mcycle_price_wei = parse_ether(&config.mcycle_price).unwrap_or(U256::from(0.00001));
+            let mcycle_price_wei = parse_ether(&config.mcycle_price).unwrap_or_else(|_| parse_ether("0.00001").unwrap());
             let gas_price_wei = U256::from(20_000_000_000u128); // 20 gwei
 
             orders.sort_by_key(|order| {
@@ -774,5 +774,341 @@ mod tests {
         assert_eq!(prioritized_orders[0].request.lock_expires_at(), current_timestamp + 500);
         assert_eq!(prioritized_orders[0].request.client_address(), priority_addr);
         assert_eq!(prioritized_orders[1].request.lock_expires_at(), current_timestamp + 100);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_order_pricing_priority_highest_expected_value() {
+        let ctx = PickerTestCtxBuilder::default().build().await;
+
+        let base_time = now_timestamp();
+
+        let mut orders = Vec::new();
+
+        // Order 0: Low price (0.05 ETH), low cycles (1M cycles)
+        let mut order0 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 0,
+                bidding_start: base_time,
+                max_price: parse_ether("0.05").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order0.total_cycles = Some(1_000_000);
+        orders.push(order0);
+
+        // Order 1: Medium-high price (0.08 ETH), medium-high cycles (10M cycles)
+        let mut order1 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 1,
+                bidding_start: base_time,
+                max_price: parse_ether("0.08").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order1.total_cycles = Some(10_000_000);
+        orders.push(order1);
+
+        // Order 2: Medium price (0.06 ETH), low cycles (2M cycles) - should have good profit
+        let mut order2 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 2,
+                bidding_start: base_time,
+                max_price: parse_ether("0.06").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order2.total_cycles = Some(2_000_000);
+        orders.push(order2);
+
+        // Order 3: Very high price (0.1 ETH), EXTREMELY high cycles (5000M cycles) - high revenue but VERY high cost
+        let mut order3 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 3,
+                bidding_start: base_time,
+                max_price: parse_ether("0.1").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order3.total_cycles = Some(5_000_000_000);
+        orders.push(order3);
+
+        let config = ctx.picker.config.lock_all().unwrap();
+        let mut selected_order_indices = Vec::new();
+        while !orders.is_empty() {
+            let selected_orders = ctx.picker.select_pricing_orders(
+                &mut orders,
+                OrderPricingPriority::HighestExpectedValue,
+                None,
+                1,
+                &config.market,
+            );
+            if let Some(order) = selected_orders.into_iter().next() {
+                let order_index =
+                    boundless_market::contracts::RequestId::try_from(order.request.id)
+                        .unwrap()
+                        .index;
+                selected_order_indices.push(order_index);
+            }
+        }
+
+        // Expected order: highest profit first
+        // With default mcycle_price of 0.00001 ETH and gas costs (~0.024 ETH):
+        // Order 0: 0.05 - (1 * 0.00001) - 0.024 = ~0.026 ETH profit
+        // Order 1: 0.08 - (10 * 0.00001) - 0.024 = ~0.056 ETH profit
+        // Order 2: 0.06 - (2 * 0.00001) - 0.024 = ~0.036 ETH profit
+        // Order 3: 0.1 - (5000 * 0.00001) - 0.024 = 0.1 - 0.05 - 0.024 = 0.026 ETH (or saturates to 0)
+        // The exact ordering depends on mcycle_price and gas estimates
+        // We mainly verify that orders are sorted by expected profit, not by price or cycles alone
+        assert_eq!(selected_order_indices.len(), 4);
+
+        // Verify orders with high cycles have reduced profit due to proving costs
+        // Order 3 has highest price but extremely high proving cost drastically reduces profit
+        // It should NOT be first (would be first if sorted by price alone)
+        assert_ne!(selected_order_indices[0], 3);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_order_pricing_priority_highest_expected_value_with_missing_cycles() {
+        let ctx = PickerTestCtxBuilder::default().build().await;
+
+        let base_time = now_timestamp();
+
+        let mut orders = Vec::new();
+
+        // Order 0: High price with cycles
+        let mut order0 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 0,
+                bidding_start: base_time,
+                max_price: parse_ether("0.1").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order0.total_cycles = Some(10_000_000);
+        orders.push(order0);
+
+        // Order 1: Low price without cycles (should assume zero proving cost)
+        let mut order1 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 1,
+                bidding_start: base_time,
+                max_price: parse_ether("0.05").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order1.total_cycles = None;
+        orders.push(order1);
+
+        // Order 2: Very high price without cycles
+        let mut order2 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 2,
+                bidding_start: base_time,
+                max_price: parse_ether("0.2").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order2.total_cycles = None;
+        orders.push(order2);
+
+        let config = ctx.picker.config.lock_all().unwrap();
+        let mut selected_order_indices = Vec::new();
+        while !orders.is_empty() {
+            let selected_orders = ctx.picker.select_pricing_orders(
+                &mut orders,
+                OrderPricingPriority::HighestExpectedValue,
+                None,
+                1,
+                &config.market,
+            );
+            if let Some(order) = selected_orders.into_iter().next() {
+                let order_index =
+                    boundless_market::contracts::RequestId::try_from(order.request.id)
+                        .unwrap()
+                        .index;
+                selected_order_indices.push(order_index);
+            }
+        }
+
+        // Orders without cycles should have highest profit (no proving cost)
+        // Expected: 2 (0.2 ETH, no proving cost = ~0.176 profit),
+        //           0 (0.1 ETH with 10M cycles = 0.1 - 0.0001 - 0.024 = ~0.076 profit),
+        //           1 (0.05 ETH, no proving cost = ~0.026 profit)
+        assert_eq!(selected_order_indices[0], 2);
+        assert_eq!(selected_order_indices[1], 0);
+        assert_eq!(selected_order_indices[2], 1);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_order_commitment_priority_highest_expected_value() {
+        let mut ctx = setup_om_test_context().await;
+        let current_timestamp = now_timestamp();
+
+        // Create orders with different profit profiles
+        let mut order1 = ctx
+            .create_test_order(FulfillmentType::LockAndFulfill, current_timestamp, 100, 200)
+            .await;
+        order1.request.offer.maxPrice = parse_ether("0.05").unwrap();
+        order1.total_cycles = Some(2_000_000);
+        let order_1_id = order1.id();
+
+        let mut order2 = ctx
+            .create_test_order(FulfillmentType::LockAndFulfill, current_timestamp, 150, 250)
+            .await;
+        order2.request.offer.maxPrice = parse_ether("0.1").unwrap();
+        order2.total_cycles = Some(10_000_000);
+        let order_2_id = order2.id();
+
+        let mut order3 = ctx
+            .create_test_order(FulfillmentType::FulfillAfterLockExpire, current_timestamp, 1, 100)
+            .await;
+        order3.request.offer.maxPrice = parse_ether("0.2").unwrap();
+        order3.total_cycles = Some(50_000_000);
+        let order_3_id = order3.id();
+
+        let mut order4 = ctx
+            .create_test_order(FulfillmentType::LockAndFulfill, current_timestamp, 200, 300)
+            .await;
+        order4.request.offer.maxPrice = parse_ether("0.01").unwrap();
+        order4.total_cycles = Some(1_000_000);
+        let order_4_id = order4.id();
+
+        let orders = vec![Arc::from(order1), Arc::from(order2), Arc::from(order3), Arc::from(order4)];
+        let config = ctx.monitor.config.lock_all().unwrap();
+        let orders = ctx.monitor.prioritize_orders(
+            orders,
+            OrderCommitmentPriority::HighestExpectedValue,
+            None,
+            &config.market,
+        );
+
+        // Verify that orders are sorted by expected profit
+        // The exact order depends on mcycle_price and gas costs, but we can verify
+        // that the lowest price order (order4) is not first
+        assert_ne!(orders[0].id(), order_4_id);
+
+        // All orders should be present
+        assert_eq!(orders.len(), 4);
+        let order_ids: Vec<_> = orders.iter().map(|o| o.id()).collect();
+        assert!(order_ids.contains(&order_1_id));
+        assert!(order_ids.contains(&order_2_id));
+        assert!(order_ids.contains(&order_3_id));
+        assert!(order_ids.contains(&order_4_id));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_order_pricing_priority_highest_expected_value_with_priority_addresses() {
+        let ctx = PickerTestCtxBuilder::default().build().await;
+        let base_time = now_timestamp();
+
+        let regular_addr = alloy::primitives::Address::from([0x42; 20]);
+        let priority_addr = alloy::primitives::Address::from([0x99; 20]);
+        let priority_addresses = vec![priority_addr];
+
+        // Regular order with very high expected profit
+        let mut regular_order = ctx
+            .generate_next_order(OrderParams {
+                order_index: 0,
+                bidding_start: base_time,
+                max_price: parse_ether("0.1").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        regular_order.request.id = boundless_market::contracts::RequestId::new(regular_addr, 0).into();
+        regular_order.total_cycles = Some(1_000_000);
+
+        // Priority order with lower expected profit
+        let mut priority_order = ctx
+            .generate_next_order(OrderParams {
+                order_index: 1,
+                bidding_start: base_time,
+                max_price: parse_ether("0.01").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        priority_order.request.id = boundless_market::contracts::RequestId::new(priority_addr, 1).into();
+        priority_order.total_cycles = Some(10_000_000);
+
+        let config = ctx.picker.config.lock_all().unwrap();
+
+        // Test without priority addresses - regular order should be first (higher profit)
+        let mut test_orders = vec![priority_order.clone(), regular_order.clone()];
+        let selected_orders = ctx.picker.select_pricing_orders(
+            &mut test_orders,
+            OrderPricingPriority::HighestExpectedValue,
+            None,
+            1,
+            &config.market,
+        );
+        let selected_order = selected_orders.into_iter().next().unwrap();
+        assert_eq!(selected_order.request.client_address(), regular_addr);
+
+        // Test with priority addresses - priority order should be first despite lower profit
+        let mut test_orders = vec![regular_order, priority_order];
+        let selected_orders = ctx.picker.select_pricing_orders(
+            &mut test_orders,
+            OrderPricingPriority::HighestExpectedValue,
+            Some(&priority_addresses),
+            1,
+            &config.market,
+        );
+        let selected_order = selected_orders.into_iter().next().unwrap();
+        assert_eq!(selected_order.request.client_address(), priority_addr);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_order_commitment_priority_highest_expected_value_with_priority_addresses() {
+        let mut ctx = setup_om_test_context().await;
+        let current_timestamp = now_timestamp();
+
+        let mut orders = Vec::new();
+
+        // Regular order with high expected profit
+        let mut regular_order = ctx
+            .create_test_order(FulfillmentType::LockAndFulfill, current_timestamp, 100, 200)
+            .await;
+        regular_order.request.offer.maxPrice = parse_ether("0.1").unwrap();
+        regular_order.total_cycles = Some(1_000_000);
+        orders.push(Arc::from(regular_order));
+
+        // Switch the signer to create a priority order
+        ctx.signer = crate::PrivateKeySigner::random();
+        let priority_addr = ctx.signer.address();
+        let priority_addresses = vec![priority_addr];
+
+        // Priority order with lower expected profit
+        let mut priority_order = ctx
+            .create_test_order(FulfillmentType::LockAndFulfill, current_timestamp, 500, 600)
+            .await;
+        priority_order.request.offer.maxPrice = parse_ether("0.01").unwrap();
+        priority_order.total_cycles = Some(10_000_000);
+        orders.push(Arc::from(priority_order));
+
+        let config = ctx.monitor.config.lock_all().unwrap();
+
+        // Test without priority addresses - regular order should be first (higher profit)
+        let test_orders = orders.clone();
+        let prioritized_orders = ctx.monitor.prioritize_orders(
+            test_orders,
+            OrderCommitmentPriority::HighestExpectedValue,
+            None,
+            &config.market,
+        );
+        assert_ne!(prioritized_orders[0].request.client_address(), priority_addr);
+
+        // Test with priority addresses - priority order should be first despite lower profit
+        let test_orders = orders.clone();
+        let prioritized_orders = ctx.monitor.prioritize_orders(
+            test_orders,
+            OrderCommitmentPriority::HighestExpectedValue,
+            Some(&priority_addresses),
+            &config.market,
+        );
+        assert_eq!(prioritized_orders[0].request.client_address(), priority_addr);
     }
 }
