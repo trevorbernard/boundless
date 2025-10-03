@@ -16,7 +16,7 @@ use crate::chain_monitor::ChainHead;
 use crate::OrderRequest;
 use crate::{
     chain_monitor::ChainMonitorService,
-    config::{ConfigLock, OrderCommitmentPriority},
+    config::{ConfigLock, MarketConf, OrderCommitmentPriority},
     db::DbObj,
     errors::CodedError,
     impl_coded_debug, now_timestamp,
@@ -134,6 +134,7 @@ struct OrderMonitorConfig {
     batch_buffer_time_secs: u64,
     order_commitment_priority: OrderCommitmentPriority,
     priority_addresses: Option<Vec<Address>>,
+    market_conf: MarketConf,
 }
 
 #[derive(Clone)]
@@ -874,6 +875,7 @@ where
                                 batch_buffer_time_secs: config.batcher.block_deadline_buffer_secs,
                                 order_commitment_priority: config.market.order_commitment_priority,
                                 priority_addresses: config.market.priority_requestor_addresses.clone(),
+                                market_conf: config.market.clone(),
                             }
                         };
 
@@ -889,7 +891,7 @@ where
                         }
 
                         // Prioritize the orders that intend to fulfill based on configured commitment priority.
-                        valid_orders = self.prioritize_orders(valid_orders, monitor_config.order_commitment_priority, monitor_config.priority_addresses.as_deref());
+                        valid_orders = self.prioritize_orders(valid_orders, monitor_config.order_commitment_priority, monitor_config.priority_addresses.as_deref(), &monitor_config.market_conf);
 
                         // Filter down the orders given our max concurrent proofs, peak khz limits, and gas limitations.
                         let final_orders = self

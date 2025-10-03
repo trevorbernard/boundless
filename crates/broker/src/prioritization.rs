@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use crate::{
-    config::{OrderCommitmentPriority, OrderPricingPriority},
+    config::{MarketConf, OrderCommitmentPriority, OrderPricingPriority},
     order_monitor::OrderMonitor,
     order_picker::OrderPicker,
     OrderRequest,
 };
 
+use alloy::primitives::{utils::parse_ether, U256};
 use rand::seq::SliceRandom;
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ enum UnifiedPriorityMode {
     Random,
     TimeOrdered,
     ShortestExpiry,
+    HighestExpectedValue,
 }
 
 impl From<OrderPricingPriority> for UnifiedPriorityMode {
@@ -36,6 +38,7 @@ impl From<OrderPricingPriority> for UnifiedPriorityMode {
             OrderPricingPriority::Random => UnifiedPriorityMode::Random,
             OrderPricingPriority::ObservationTime => UnifiedPriorityMode::TimeOrdered,
             OrderPricingPriority::ShortestExpiry => UnifiedPriorityMode::ShortestExpiry,
+            OrderPricingPriority::HighestExpectedValue => UnifiedPriorityMode::HighestExpectedValue,
         }
     }
 }
@@ -45,19 +48,60 @@ impl From<OrderCommitmentPriority> for UnifiedPriorityMode {
         match mode {
             OrderCommitmentPriority::Random => UnifiedPriorityMode::Random,
             OrderCommitmentPriority::ShortestExpiry => UnifiedPriorityMode::ShortestExpiry,
+            OrderCommitmentPriority::HighestExpectedValue => UnifiedPriorityMode::HighestExpectedValue,
         }
     }
+}
+
+/// Calculate probability of successfully completing an order
+/// V1: Returns 1.0 (100% probability). Future versions can implement sophisticated logic.
+fn calculate_success_probability(_order: &OrderRequest) -> f64 {
+    1.0
+}
+
+/// Calculate expected profit for an order
+/// Returns profit in wei as U256 (saturates to 0 for unprofitable orders to they get sorted last)
+fn calculate_expected_profit(
+    order: &OrderRequest,
+    mcycle_price_wei: U256,
+    gas_price_wei: U256,
+    lockin_gas: u64,
+    fulfill_gas: u64,
+    verify_gas: u64,
+) -> U256 {
+    // TODO: use the market value of the auction
+    let revenue = order.request.offer.maxPrice;
+
+    // Cost 1: Proving costs based on cycles
+    let proving_cost = if let Some(cycles) = order.total_cycles {
+        let mcycles = cycles / 1_000_000;
+        mcycle_price_wei * U256::from(mcycles)
+    } else {
+        U256::ZERO
+    };
+
+    // Cost 2: Gas costs (estimates)
+    let total_gas = U256::from(lockin_gas) + U256::from(fulfill_gas) + U256::from(verify_gas);
+    let gas_cost = total_gas * gas_price_wei;
+
+    let total_cost = proving_cost + gas_cost;
+
+    // Calculate profit (saturate to 0 if costs > revenue)
+    let profit = revenue.saturating_sub(total_cost);
+
+    profit * U256::from(calculate_success_probability(order))
 }
 
 fn sort_orders_by_priority_and_mode<T>(
     orders: &mut Vec<T>,
     priority_addresses: Option<&[alloy::primitives::Address]>,
     mode: UnifiedPriorityMode,
+    config: &MarketConf,
 ) where
     T: AsRef<OrderRequest>,
 {
     let Some(addresses) = priority_addresses else {
-        sort_by_mode(orders, mode);
+        sort_by_mode(orders, mode, config);
         return;
     };
 
@@ -65,14 +109,14 @@ fn sort_orders_by_priority_and_mode<T>(
         .drain(..)
         .partition(|order| addresses.contains(&order.as_ref().request.client_address()));
 
-    sort_by_mode(&mut priority_orders, mode);
-    sort_by_mode(&mut regular_orders, mode);
+    sort_by_mode(&mut priority_orders, mode, config);
+    sort_by_mode(&mut regular_orders, mode, config);
 
     orders.extend(priority_orders);
     orders.extend(regular_orders);
 }
 
-fn sort_by_mode<T>(orders: &mut [T], mode: UnifiedPriorityMode)
+fn sort_by_mode<T>(orders: &mut [T], mode: UnifiedPriorityMode, config: &MarketConf)
 where
     T: AsRef<OrderRequest>,
 {
@@ -83,6 +127,23 @@ where
         }
         UnifiedPriorityMode::ShortestExpiry => {
             orders.sort_by_key(|order| order.as_ref().expiry());
+        }
+        UnifiedPriorityMode::HighestExpectedValue => {
+            let mcycle_price_wei = parse_ether(&config.mcycle_price).unwrap_or(U256::from(0.00001));
+            let gas_price_wei = U256::from(20_000_000_000u128); // 20 gwei
+
+            orders.sort_by_key(|order| {
+                let profit = calculate_expected_profit(
+                    order.as_ref(),
+                    mcycle_price_wei,
+                    gas_price_wei,
+                    config.lockin_gas_estimate,
+                    config.fulfill_gas_estimate,
+                    config.groth16_verify_gas_estimate,
+                );
+                // Sort descending (highest profit first)
+                std::cmp::Reverse(profit)
+            });
         }
     }
 }
@@ -95,12 +156,13 @@ impl<P> OrderPicker<P> {
         priority_mode: OrderPricingPriority,
         priority_addresses: Option<&[alloy::primitives::Address]>,
         capacity: usize,
+        config: &MarketConf,
     ) -> Vec<Box<OrderRequest>> {
         if orders.is_empty() || capacity == 0 {
             return Vec::new();
         }
 
-        sort_orders_by_priority_and_mode(orders, priority_addresses, priority_mode.into());
+        sort_orders_by_priority_and_mode(orders, priority_addresses, priority_mode.into(), config);
 
         let take_count = std::cmp::min(capacity, orders.len());
         orders.drain(..take_count).collect()
@@ -115,9 +177,10 @@ impl<P> OrderMonitor<P> {
         mut orders: Vec<Arc<OrderRequest>>,
         priority_mode: OrderCommitmentPriority,
         priority_addresses: Option<&[alloy::primitives::Address]>,
+        config: &MarketConf,
     ) -> Vec<Arc<OrderRequest>> {
         // Sort orders with priority addresses first, then by mode
-        sort_orders_by_priority_and_mode(&mut orders, priority_addresses, priority_mode.into());
+        sort_orders_by_priority_and_mode(&mut orders, priority_addresses, priority_mode.into(), config);
 
         tracing::debug!(
             "Orders ready for proving, prioritized. Before applying capacity limits: {}",
@@ -156,6 +219,7 @@ mod tests {
             orders.push(order);
         }
 
+        let config = ctx.picker.config.lock_all().unwrap();
         let mut selected_order_indices = Vec::new();
         while !orders.is_empty() {
             let selected_orders = ctx.picker.select_pricing_orders(
@@ -163,6 +227,7 @@ mod tests {
                 OrderPricingPriority::ObservationTime,
                 None,
                 1,
+                &config.market,
             );
             if let Some(order) = selected_orders.into_iter().next() {
                 let order_index =
@@ -200,6 +265,7 @@ mod tests {
         }
 
         // Test that shortest_expiry mode returns orders by earliest expiry
+        let config = ctx.picker.config.lock_all().unwrap();
         let mut selected_order_indices = Vec::new();
         while !orders.is_empty() {
             let selected_orders = ctx.picker.select_pricing_orders(
@@ -207,6 +273,7 @@ mod tests {
                 OrderPricingPriority::ShortestExpiry,
                 None,
                 1,
+                &config.market,
             );
             if let Some(order) = selected_orders.into_iter().next() {
                 let order_index =
@@ -270,6 +337,7 @@ mod tests {
         orders.push(order3);
 
         // Test selection order
+        let config = ctx.picker.config.lock_all().unwrap();
         let mut selected_order_indices = Vec::new();
         while !orders.is_empty() {
             let selected_orders = ctx.picker.select_pricing_orders(
@@ -277,6 +345,7 @@ mod tests {
                 OrderPricingPriority::ShortestExpiry,
                 None,
                 1,
+                &config.market,
             );
             if let Some(order) = selected_orders.into_iter().next() {
                 let order_index =
@@ -301,6 +370,7 @@ mod tests {
 
         // Run the test multiple times to verify randomness
         let mut all_orderings = HashSet::new();
+        let config = ctx.picker.config.lock_all().unwrap();
 
         for _ in 0..20 {
             // Run 20 times to get different random orderings
@@ -319,6 +389,7 @@ mod tests {
                     OrderPricingPriority::Random,
                     None,
                     1,
+                    &config.market,
                 );
                 if let Some(order) = selected_orders.into_iter().next() {
                     let order_index =
@@ -374,8 +445,9 @@ mod tests {
 
         let orders =
             vec![Arc::from(order1), Arc::from(order2), Arc::from(order3), Arc::from(order4)];
+        let config = ctx.monitor.config.lock_all().unwrap();
         let orders =
-            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::ShortestExpiry, None);
+            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::ShortestExpiry, None, &config.market);
 
         assert!(orders[0].id() == order_1_id);
         assert!(orders[1].id() == order_3_id);
@@ -420,11 +492,12 @@ mod tests {
 
         // Run multiple times to test randomness of all orders
         let mut all_orderings = HashSet::new();
+        let config = ctx.monitor.config.lock_all().unwrap();
 
         for _ in 0..10 {
             let test_orders = orders.clone();
             let test_orders =
-                ctx.monitor.prioritize_orders(test_orders, OrderCommitmentPriority::Random, None);
+                ctx.monitor.prioritize_orders(test_orders, OrderCommitmentPriority::Random, None, &config.market);
 
             // Extract the ordering of all orders
             let order_ids: Vec<_> = test_orders.iter().map(|order| order.request.id).collect();
@@ -436,7 +509,7 @@ mod tests {
 
         // Test that random mode produces different orderings
         let prioritized =
-            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::Random, None);
+            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::Random, None, &config.market);
 
         // We should have 3 LockAndFulfill and 3 FulfillAfterLockExpire orders in total
         let lock_and_fulfill_count = prioritized
@@ -484,8 +557,9 @@ mod tests {
             orders.push(Arc::from(order));
         }
 
+        let config = ctx.monitor.config.lock_all().unwrap();
         let prioritized =
-            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::ShortestExpiry, None);
+            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::ShortestExpiry, None, &config.market);
 
         // Orders should be sorted by their relevant expiry times, regardless of type
         // Expected order: LockAndFulfill(100), LockAndFulfill(150), FulfillAfterLockExpire(150), LockAndFulfill(200), FulfillAfterLockExpire(250), FulfillAfterLockExpire(300)
@@ -539,17 +613,19 @@ mod tests {
             orders.push(Arc::from(order));
         }
 
+        let config = ctx.monitor.config.lock_all().unwrap();
         // Test random mode (no need to capture result since it's random)
         let _prioritized_random = orders.clone();
         let _prioritized_random = ctx.monitor.prioritize_orders(
             _prioritized_random,
             OrderCommitmentPriority::Random,
             None,
+            &config.market,
         );
 
         // Test shortest expiry mode
         let prioritized_shortest =
-            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::ShortestExpiry, None);
+            ctx.monitor.prioritize_orders(orders, OrderCommitmentPriority::ShortestExpiry, None, &config.market);
 
         // In shortest expiry mode, orders should be sorted by expiry time
         for i in 0..3 {
@@ -599,12 +675,14 @@ mod tests {
         priority_order_1.request.id =
             boundless_market::contracts::RequestId::new(priority_addr, 1).into();
 
+        let config = ctx.picker.config.lock_all().unwrap();
         let mut test_orders = vec![regular_order_1, priority_order_1];
         let selected_orders = ctx.picker.select_pricing_orders(
             &mut test_orders,
             OrderPricingPriority::ShortestExpiry,
             None,
             1,
+            &config.market,
         );
         let selected_order = selected_orders.into_iter().next().unwrap();
         assert_eq!(selected_order.request.client_address(), regular_addr); // Regular order selected due to shorter expiry
@@ -638,6 +716,7 @@ mod tests {
             OrderPricingPriority::ShortestExpiry,
             Some(&priority_addresses),
             1,
+            &config.market,
         );
         let selected_order = selected_orders.into_iter().next().unwrap();
         assert_eq!(selected_order.request.client_address(), priority_addr); // Priority order selected first despite longer expiry
@@ -671,12 +750,14 @@ mod tests {
             .await;
         orders.push(Arc::from(priority_order));
 
+        let config = ctx.monitor.config.lock_all().unwrap();
         // Test shortest expiry mode without priority addresses
         let test_orders = orders.clone();
         let prioritized_orders = ctx.monitor.prioritize_orders(
             test_orders,
             OrderCommitmentPriority::ShortestExpiry,
             None,
+            &config.market,
         );
         assert_eq!(prioritized_orders[0].request.lock_expires_at(), current_timestamp + 100); // Regular order first
 
@@ -686,6 +767,7 @@ mod tests {
             test_orders,
             OrderCommitmentPriority::ShortestExpiry,
             Some(&priority_addresses),
+            &config.market,
         );
 
         // Priority order should be first despite longer expiry, regular order second

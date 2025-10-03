@@ -1159,10 +1159,11 @@ where
                     cfg.market.max_concurrent_preflights as usize,
                     cfg.market.order_pricing_priority,
                     cfg.market.priority_requestor_addresses.clone(),
+                    cfg.market.clone(),
                 ))
             };
 
-            let (mut current_capacity, mut priority_mode, mut priority_addresses) =
+            let (mut current_capacity, mut priority_mode, mut priority_addresses, mut market_conf) =
                 read_config().map_err(SupervisorErr::Fault)?;
             let mut tasks: JoinSet<(String, U256)> = JoinSet::new();
             let mut rx = picker.new_order_rx.lock().await;
@@ -1219,7 +1220,7 @@ where
                     }
                     _ = capacity_check_interval.tick() => {
                         // Check capacity on an interval for capacity changes in config
-                        let (new_capacity, new_priority_mode, new_priority_addresses) = read_config().map_err(SupervisorErr::Fault)?;
+                        let (new_capacity, new_priority_mode, new_priority_addresses, new_market_conf) = read_config().map_err(SupervisorErr::Fault)?;
                         if new_capacity != current_capacity{
                             tracing::debug!("Pricing capacity changed from {} to {}", current_capacity, new_capacity);
                             current_capacity = new_capacity;
@@ -1232,6 +1233,7 @@ where
                             tracing::debug!("Priority requestor addresses changed");
                             priority_addresses = new_priority_addresses;
                         }
+                        market_conf = new_market_conf;
 
                         // Log active pricing tasks if they've changed
                         let current_tasks_log = format_active_tasks(&active_tasks);
@@ -1259,6 +1261,7 @@ where
                         priority_mode,
                         priority_addresses.as_deref(),
                         available_capacity,
+                        &market_conf,
                     );
 
                     for order in selected_orders {
