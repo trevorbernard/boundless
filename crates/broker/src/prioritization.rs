@@ -1111,4 +1111,77 @@ mod tests {
         );
         assert_eq!(prioritized_orders[0].request.client_address(), priority_addr);
     }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_highest_expected_value_unprofitable_orders() {
+        let ctx = PickerTestCtxBuilder::default().build().await;
+        let base_time = now_timestamp();
+
+        let mut orders = Vec::new();
+
+        // Order 0: Profitable order - high price, low cycles
+        let mut order0 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 0,
+                bidding_start: base_time,
+                max_price: parse_ether("0.1").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order0.total_cycles = Some(1_000_000);
+        orders.push(order0);
+
+        // Order 1: Unprofitable order - very low price, extremely high cycles
+        // Revenue: 0.001 ETH, Cost: ~(10000 * 0.00001) + 0.024 = 0.1 + 0.024 = 0.124 ETH
+        // Should saturate to 0 profit
+        let mut order1 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 1,
+                bidding_start: base_time,
+                max_price: parse_ether("0.001").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order1.total_cycles = Some(10_000_000_000); // 10B cycles = 10k mcycles
+        orders.push(order1);
+
+        // Order 2: Moderately profitable order
+        let mut order2 = ctx
+            .generate_next_order(OrderParams {
+                order_index: 2,
+                bidding_start: base_time,
+                max_price: parse_ether("0.05").unwrap(),
+                ..Default::default()
+            })
+            .await;
+        order2.total_cycles = Some(2_000_000);
+        orders.push(order2);
+
+        let config = ctx.picker.config.lock_all().unwrap();
+        let mut selected_order_indices = Vec::new();
+        while !orders.is_empty() {
+            let selected_orders = ctx.picker.select_pricing_orders(
+                &mut orders,
+                OrderPricingPriority::HighestExpectedValue,
+                None,
+                1,
+                &config.market,
+            );
+            if let Some(order) = selected_orders.into_iter().next() {
+                let order_index =
+                    boundless_market::contracts::RequestId::try_from(order.request.id)
+                        .unwrap()
+                        .index;
+                selected_order_indices.push(order_index);
+            }
+        }
+
+        // Unprofitable order (order 1) should be sorted last
+        assert_eq!(selected_order_indices[2], 1);
+
+        // Profitable orders should come first (exact order depends on profit calculation)
+        assert!(selected_order_indices[0] == 0 || selected_order_indices[0] == 2);
+        assert!(selected_order_indices[1] == 0 || selected_order_indices[1] == 2);
+    }
 }
