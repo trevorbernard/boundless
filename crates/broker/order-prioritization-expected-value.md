@@ -250,6 +250,10 @@ let current_price = calculate_dutch_auction_price(
 
 The implementation includes comprehensive tests:
 
+``` bash
+cargo test prioritization::tests
+```
+
 ### Unit Tests
 - Verify profit calculation with known values
 - Verify success probability on completing the order
@@ -259,3 +263,26 @@ The implementation includes comprehensive tests:
 - Verify sorting correctness (highest profit first)
 - Priority addresses take precedence
 - Handle negative profit (saturate to 0)
+
+### e2e Tests
+
+I was unable to get a testnet environment up and running in a reasonable amount
+of time for an e2e test.
+
+Steps attempted:
+
+``` bash
+cargo clean
+cargo build
+forge build
+just localnet up
+
+# modified broker.toml
+# order_pricing_priority = "highest_expected_value"
+# order_commitment_priority = "highest_expected_value"
+
+source .env.localnet && cargo run --bin broker
+```
+
+I also fixed an issue where `boundless account deposit-stake 100` CLI command
+doesn't exist.
