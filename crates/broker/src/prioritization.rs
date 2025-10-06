@@ -976,9 +976,6 @@ mod tests {
             &config.market,
         );
 
-        // Verify that orders are sorted by expected profit
-        // The exact order depends on mcycle_price and gas costs, but we can verify
-        // that the lowest price order (order4) is not first
         assert_ne!(orders[0].id(), order_4_id);
 
         // All orders should be present
@@ -1168,11 +1165,6 @@ mod tests {
             }
         }
 
-        // Unprofitable order (order 1) should be sorted last
-        assert_eq!(selected_order_indices[2], 1);
-
-        // Profitable orders should come first (exact order depends on profit calculation)
-        assert!(selected_order_indices[0] == 0 || selected_order_indices[0] == 2);
-        assert!(selected_order_indices[1] == 0 || selected_order_indices[1] == 2);
+        assert_eq!(selected_order_indices, vec![0, 2, 1]);
     }
 }
