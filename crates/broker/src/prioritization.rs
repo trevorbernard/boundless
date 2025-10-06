@@ -929,9 +929,7 @@ mod tests {
         // Expected: 2 (0.2 ETH, no proving cost = ~0.176 profit),
         //           0 (0.1 ETH with 10M cycles = 0.1 - 0.0001 - 0.024 = ~0.076 profit),
         //           1 (0.05 ETH, no proving cost = ~0.026 profit)
-        assert_eq!(selected_order_indices[0], 2);
-        assert_eq!(selected_order_indices[1], 0);
-        assert_eq!(selected_order_indices[2], 1);
+        assert_eq!(selected_order_indices, vec![2, 0, 1]);
     }
 
     #[tokio::test]
