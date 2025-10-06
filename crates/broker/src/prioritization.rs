@@ -852,20 +852,13 @@ mod tests {
             }
         }
 
-        // Expected order: highest profit first
-        // With default mcycle_price of 0.00001 ETH and gas costs (~0.024 ETH):
-        // Order 0: 0.05 - (1 * 0.00001) - 0.024 = ~0.026 ETH profit
-        // Order 1: 0.08 - (10 * 0.00001) - 0.024 = ~0.056 ETH profit
-        // Order 2: 0.06 - (2 * 0.00001) - 0.024 = ~0.036 ETH profit
-        // Order 3: 0.1 - (5000 * 0.00001) - 0.024 = 0.1 - 0.05 - 0.024 = 0.026 ETH (or saturates to 0)
-        // The exact ordering depends on mcycle_price and gas estimates
-        // We mainly verify that orders are sorted by expected profit, not by price or cycles alone
         assert_eq!(selected_order_indices.len(), 4);
 
-        // Verify orders with high cycles have reduced profit due to proving costs
-        // Order 3 has highest price but extremely high proving cost drastically reduces profit
-        // It should NOT be first (would be first if sorted by price alone)
-        assert_ne!(selected_order_indices[0], 3);
+        // Order 0: 0.05 - (1 * 0.00001) - 0.024 = 0.02599 ETH profit
+        // Order 1: 0.08 - (10 * 0.00001) - 0.024 = 0.0559 ETH profit
+        // Order 2: 0.06 - (2 * 0.00001) - 0.024 = 0.03598 ETH profit
+        // Order 3: 0.1 - (5000 * 0.00001) - 0.024 = 0.1 - 0.05 - 0.024 = 0.026 ETH
+        assert_eq!(selected_order_indices, vec![1, 2, 3, 0]);
     }
 
     #[tokio::test]
