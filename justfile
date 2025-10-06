@@ -299,7 +299,7 @@ localnet action="up": check-deps
             BOUNDLESS_MARKET_ADDRESS=$BOUNDLESS_MARKET_ADDRESS \
             SET_VERIFIER_ADDRESS=$SET_VERIFIER_ADDRESS \
             VERIFIER_ADDRESS=$VERIFIER_ADDRESS \
-            ./target/debug/boundless account deposit-stake 100 || echo "Note: Stake deposit failed, but this is non-critical for localnet setup"
+            ./target/debug/boundless account deposit 100 || echo "Note: Stake deposit failed, but this is non-critical for localnet setup"
             
             echo "Localnet is running with RISC0_DEV_MODE=$RISC0_DEV_MODE"
             if [ ! -f broker.toml ]; then
